@@ -4,9 +4,9 @@ from ta.momentum import rsi
 import pandas_ta as pta
 import pandas as pd
 import numpy as np
-from src.utils.utils import reposition_column
+from scipy.signal import argrelextrema
 from scipy.stats import percentileofscore
-
+from src.utils.utils import reposition_column
 
 # ── Multi-timeframe helpers ────────────────────────────────────────────────────
 _WEEKLY_FREQ = 'W-FRI'
@@ -21,6 +21,18 @@ _DAILY_RENAMES = {
     'supert': 'supert_d',
     'supertd': 'supertd_d',
 }
+
+
+def get_swing_nodes(ticker_df, order_h, order_l):
+    relmax_idx = argrelextrema(ticker_df['high'].values,
+                               np.greater_equal,
+                               order=order_h)
+
+    relmin_idx = argrelextrema(ticker_df['low'].values,
+                               np.less,
+                               order=order_l)
+
+    return relmax_idx, relmin_idx
 
 
 def calculate_percentile(series: np.ndarray) -> float:
@@ -112,13 +124,40 @@ def _supertrend(high: pd.Series, low: pd.Series, close: pd.Series,
         return pd.DataFrame({col_s: np.nan, col_d: np.nan}, index=high.index)
 
 
+def wilder_ma(close: pd.Series, window: int) -> pd.Series:
+    return close.ewm(alpha=1 / window, adjust=False).mean()
+
+
+def calc_drawdown_streak(
+        price_change, price_change_b1, price_change_b2,
+        high, high_b1, high_b2,
+        price_struct, price_struct_b1, price_struct_b2
+) -> np.ndarray:
+    conditions = [price_change < 0,  # Condition 1
+                  (price_change >= 0) &  # Condition 2
+                  (price_struct == "LHLL"),
+                  (price_change >= 0) &  # Condition 3
+                  ((price_struct == "LHHL") |
+                   (price_struct == "HHLL")) &
+                  (high < np.maximum(high_b1, high_b2)) &
+                  ((price_change_b1 < 0) |
+                   (price_struct_b1 == 'LHLL')),
+                  (price_change >= 0) &  # Condition 4
+                  (high < np.maximum(high_b1, high_b2)) &
+                  (price_change_b2 < 0) &
+                  (price_struct_b2 == 'LHLL'), ]
+    options = [1, 1, 1, 1,]
+    drawdown = np.select(conditions, options, 0)
+
+    return calc_streak(pd.Series(drawdown))
+
+
 def compute_features_d(price_df: pd.DataFrame) -> pd.DataFrame:
     data = price_df.copy()
     close = data['close']
     high = data['high']
     low = data['low']
     open_ = data['open']
-    # delpct = data['delpct']
 
     # 1. Lagged OHLC b1–b6
     for i in range(1, 7):
@@ -164,10 +203,6 @@ def compute_features_d(price_df: pd.DataFrame) -> pd.DataFrame:
     data['sma50'] = sma_indicator(close, window=50)
     data['sma100'] = sma_indicator(close, window=100)
     data['sma200'] = sma_indicator(close, window=200)
-    # data['delpct_sma10'] = sma_indicator(delpct, window=10)
-    # data['delpct_sma50'] = sma_indicator(delpct, window=50)
-    # data['delpct_sma100'] = sma_indicator(delpct, window=100)
-    # data['delpct_sma200'] = sma_indicator(delpct, window=200)
 
     # 8. ATR and net change in ATR units
     data['atr_14'] = compute_atr(data, 14)
@@ -193,39 +228,10 @@ def compute_features_d(price_df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ── Standalone weekly / monthly feature functions ─────────────────────────────
-
-def wilder_ma(close: pd.Series, window: int) -> pd.Series:
-    return close.ewm(alpha=1 / window, adjust=False).mean()
-
-
-def calc_drawdown_streak(
-        price_change, price_change_b1, price_change_b2,
-        high, high_b1, high_b2,
-        price_struct, price_struct_b1, price_struct_b2
-) -> np.ndarray:
-    conditions = [price_change < 0,  # Condition 1
-                  (price_change >= 0) &  # Condition 2
-                  (price_struct == "LHLL"),
-                  (price_change >= 0) &  # Condition 3
-                  ((price_struct == "LHHL") |
-                   (price_struct == "HHLL")) &
-                  (high < np.maximum(high_b1, high_b2)) &
-                  ((price_change_b1 < 0) |
-                   (price_struct_b1 == 'LHLL')),
-                  (price_change >= 0) &  # Condition 4
-                  (high < np.maximum(high_b1, high_b2)) &
-                  (price_change_b2 < 0) &
-                  (price_struct_b2 == 'LHLL'), ]
-    options = [1, 1, 1, 1,]
-    drawdown = np.select(conditions, options, 0)
-
-    return calc_streak(pd.Series(drawdown))
-
-
-
 def compute_features_w(price_df: pd.DataFrame) -> pd.DataFrame:
     data = price_df.copy()
     close = data['close']
+    low = data['low']
 
     # 1. Lagged OHLC b1..6
     for col in ['open', 'high', 'low', 'close']:
@@ -282,6 +288,26 @@ def compute_features_w(price_df: pd.DataFrame) -> pd.DataFrame:
     for i in range(1, 3):
         data[f'crsi_b{i}'] = data['crsi'].shift(i)
 
+    # Stop loss levels based on ATR, 30 SMA, supert and corresponding sell signal
+    atr_mult = 1.0     # tunable
+    st_buffer = 0.02   # tunable
+    sl1 = data[['sma30', 'wdma30']].min(axis=1) - atr_mult * data['atr_14']
+    sl2 = (1 - st_buffer) * data['supert']
+    sl3 = (1 - st_buffer) * data['supert_b1']
+    data['sl'] = pd.concat([sl1, sl2, sl3], axis=1).min(axis=1)
+    data['sl_b1'] = data['sl'].shift(1)
+
+    # Max risk
+    data['risk'] = compute_max_risk(data, 'sl')
+    # mask = data['close'] > data['sl']
+    # data.loc[mask, 'risk'] = np.maximum(
+    #     (data.loc[mask, 'close'] - data.loc[mask, 'sl']) / data.loc[mask, 'close'],
+    #     (data.loc[mask, 'close'] - data.loc[mask, 'low']) / data.loc[mask, 'close']
+    # )
+
+    data['sell'] = (close < data['sl']).astype(int)
+    data['sell_b1'] = data['sell'].shift(1)
+
     data = reposition_column(data, 'symbol', 1)
 
     return data
@@ -305,7 +331,26 @@ def compute_features_m(price_df: pd.DataFrame) -> pd.DataFrame:
     data['high_24m_b1'] = data['high_24m'].shift(1)
     data['high_36m_b1'] = data['high_36m'].shift(1)
 
-    # 3. Price changes, lags, backward cross-period, forward cross-period
+    # 2b. Swing peaks and troughs (forward-filled to carry last confirmed level)
+    peak_idx, trough_idx = get_swing_nodes(data, order_h=12, order_l=8)
+    data['peak'] = np.nan
+    data['trough'] = np.nan
+    if len(peak_idx[0]):
+        data.iloc[peak_idx[0], data.columns.get_loc('peak')] = data['high'].iloc[peak_idx[0]].values
+    if len(trough_idx[0]):
+        data.iloc[trough_idx[0], data.columns.get_loc('trough')] = data['low'].iloc[trough_idx[0]].values
+    data['peak'] = data['peak'].ffill()
+    data['trough'] = data['trough'].ffill()
+
+    data['peak_b1'] = data['peak'].shift(1)
+    data['trough_b1'] = data['trough'].shift(1)
+
+    # 3. Upper limit for buy price based on recent swing peak + ATR buffer
+    overshoot_coeff = 1.15  # tunable
+    data['max_buy_price'] = overshoot_coeff * data['peak']
+    data['max_buy_price_b1'] = data['max_buy_price'].shift(1)
+
+    # 4. Price changes, lags, backward cross-period, forward cross-period
     data['price_change'] = close.pct_change()
     data = pd.concat([data, pd.DataFrame(
         {f'price_change_b{i}': data['price_change'].shift(i) for i in range(1, 3)},
@@ -318,18 +363,8 @@ def compute_features_m(price_df: pd.DataFrame) -> pd.DataFrame:
         index=data.index,
     )], axis=1)
 
-    # 4. Sharpe (12/24/36-period, sqrt(12) annualisation) and momentum
-    def _sharpe(w):
-        mu = data['price_change'].rolling(w).mean()
-        sig = data['price_change'].rolling(w).std()
-        return np.divide(mu, sig, out=np.full_like(mu, np.nan, dtype=float), where=sig != 0) * np.sqrt(12)
-
-    for w in [12, 24, 36]:
-        data[f'sharpe_{w}'] = _sharpe(w)
-    data['sharpe_mmt'] = sharpe_momentum(data['sharpe_24'].to_numpy(dtype=float), freq='d', window=10)
-
     # 5. Supertrend
-    data = pd.concat([data, _supertrend(data['high'], data['low'], data['close'])], axis=1)
+    # data = pd.concat([data, _supertrend(data['high'], data['low'], data['close'])], axis=1)
 
     # 6. EMA(5) / EMA(10) and lags b1..2
     data['ema5'] = ema_indicator(close, window=5)
@@ -416,3 +451,154 @@ def compute_features_m(price_df: pd.DataFrame) -> pd.DataFrame:
     data = reposition_column(data, 'symbol', 1)
 
     return data.copy()
+
+
+def _asof_join_bars(daily_df: pd.DataFrame, bar_df: pd.DataFrame) -> pd.DataFrame:
+    """Backward as-of join: each daily row gets the most recent bar on or before its date."""
+    # resolve daily dates
+    if isinstance(daily_df.index, pd.DatetimeIndex):
+        daily_dates = pd.to_datetime(daily_df.index)
+    else:
+        daily_dates = pd.to_datetime(daily_df['date'])
+
+    # resolve bar dates — prefer DatetimeIndex, fall back to 'date' column
+    if isinstance(bar_df.index, pd.DatetimeIndex):
+        bar_reset = bar_df.reset_index()
+        bar_reset.columns = ['_bar_date_'] + list(bar_reset.columns[1:])
+    elif 'date' in bar_df.columns:
+        bar_reset = bar_df.copy().rename(columns={'date': '_bar_date_'})
+    else:
+        raise ValueError("bar_df must have a DatetimeIndex or a 'date' column")
+
+    bar_reset['_bar_date_'] = pd.to_datetime(bar_reset['_bar_date_'])
+
+    positions = np.arange(len(daily_df))
+    left = pd.DataFrame({'_pos_': positions, '_date_': daily_dates.values})
+
+    joined = (
+        pd.merge_asof(
+            left.sort_values('_date_'),
+            bar_reset.sort_values('_bar_date_'),
+            left_on='_date_', right_on='_bar_date_',
+            direction='backward',
+        )
+        .drop(columns=['_bar_date_', '_date_'])
+        .sort_values('_pos_')
+        .drop(columns=['_pos_'])
+    )
+    joined.index = daily_df.index
+    return pd.concat([daily_df, joined], axis=1)
+
+
+def map_weekly_to_daily(features_d: pd.DataFrame, features_w: pd.DataFrame,
+                        columns: list) -> pd.DataFrame:
+    """
+    Map weekly bar columns onto daily rows with a Friday/non-Friday split.
+    For each name in `columns`:
+      - Friday rows  → col        (current week's value)
+      - Mon–Thu rows → col_b1     (previous week's value)
+    Output column is named {col}_w in features_d.
+    features_w must contain a 'date' column (first trading day of each week).
+    """
+    feat_cols = [c for col in columns for c in [col, f'{col}_b1'] if c in features_w.columns]
+
+    def _join_sym(grp_d: pd.DataFrame, grp_w: pd.DataFrame) -> pd.DataFrame:
+        w_indexed = grp_w.set_index(pd.to_datetime(grp_w['date']))[feat_cols]
+        # Prefix to avoid collision with same-named columns already in features_d
+        w_indexed = w_indexed.rename(columns={c: f'_wk_{c}' for c in w_indexed.columns})
+        result = _asof_join_bars(grp_d, w_indexed)
+        is_eow = pd.to_datetime(result['date']).dt.dayofweek.values >= 4
+        for col in columns:
+            curr, prev, out = f'_wk_{col}', f'_wk_{col}_b1', f'{col}_w'
+            if curr in result.columns and prev in result.columns:
+                result[out] = np.where(is_eow, result[curr], result[prev])
+                result = result.drop(columns=[curr, prev])
+            elif curr in result.columns:
+                result = result.rename(columns={curr: out})
+        return result
+
+    if 'symbol' in features_d.columns and 'symbol' in features_w.columns:
+        parts = []
+        for sym, grp_d in features_d.groupby('symbol', sort=False):
+            grp_w = features_w[features_w['symbol'] == sym]
+            parts.append(_join_sym(grp_d, grp_w))
+        return pd.concat(parts).sort_index()
+
+    return _join_sym(features_d, features_w)
+
+
+def map_monthly_swings_to_daily(features_d: pd.DataFrame, features_m: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add 'peak_b1' and 'trough_b1' to features_d from monthly bar features.
+    All daily rows within a calendar month receive the previous-month's swing peak and trough.
+    features_m must contain a 'date' column (first trading day of each month).
+    """
+    feat_cols = [c for c in ['peak_b1', 'trough_b1'] if c in features_m.columns]
+    if not feat_cols:
+        return features_d
+
+    def _join_sym(grp_d: pd.DataFrame, grp_m: pd.DataFrame) -> pd.DataFrame:
+        m_indexed = grp_m.set_index(pd.to_datetime(grp_m['date']))[feat_cols]
+        return _asof_join_bars(grp_d, m_indexed)
+
+    if 'symbol' in features_d.columns and 'symbol' in features_m.columns:
+        parts = []
+        for sym, grp_d in features_d.groupby('symbol', sort=False):
+            grp_m = features_m[features_m['symbol'] == sym]
+            parts.append(_join_sym(grp_d, grp_m))
+        return pd.concat(parts).sort_index()
+
+    return _join_sym(features_d, features_m)
+
+
+def compute_buy_range_u(features_d: pd.DataFrame, features_m: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add 'max_buy_price_b1' to features_d from monthly bar features.
+    All daily rows within a calendar month receive the previous-month's max buy price.
+    features_m must contain a 'date' column (first trading day of each month).
+    """
+    if 'max_buy_price_b1' not in features_m.columns:
+        return features_d
+
+    def _join_sym(grp_d: pd.DataFrame, grp_m: pd.DataFrame) -> pd.DataFrame:
+        m_indexed = grp_m.set_index(pd.to_datetime(grp_m['date']))[['max_buy_price_b1']]
+        return _asof_join_bars(grp_d, m_indexed)
+
+    if 'symbol' in features_d.columns and 'symbol' in features_m.columns:
+        parts = []
+        for sym, grp_d in features_d.groupby('symbol', sort=False):
+            grp_m = features_m[features_m['symbol'] == sym]
+            parts.append(_join_sym(grp_d, grp_m))
+        return pd.concat(parts).sort_index()
+
+    return _join_sym(features_d, features_m)
+
+
+def get_batches(price_df: pd.DataFrame) -> list[pd.DataFrame]:
+    return [
+        g.reset_index(drop=True)
+        for _, g in price_df.groupby(['symbol'], sort=False)
+    ]
+
+
+def compute_max_risk(data: pd.DataFrame, sl_col: str='sl') -> pd.Series:
+    temp = data.copy()
+    temp['risk'] = np.nan
+    mask = temp['close'] > temp[sl_col]
+    temp.loc[mask, 'risk'] = np.maximum(
+        (temp.loc[mask, 'close'] - temp.loc[mask, sl_col]) / temp.loc[mask, 'close'],
+        (temp.loc[mask, 'close'] - temp.loc[mask, 'low']) / temp.loc[mask, 'close']
+    )
+    return temp['risk']
+
+
+def compute_buy_flag(features_d: pd.DataFrame) -> pd.Series:
+    tmp = features_d.copy()
+    conditions = [
+        tmp['close'] > tmp['supert_w'],  # price above weekly supertrend
+        tmp['crsi'] < 50,  # not already overbought
+        tmp['risk'] < 0.4,  # max risk below 40%
+        tmp['close'] < tmp['max_buy_price_b1'],  # below prior month's max buy price
+    ]
+
+    return pd.Series(np.where(np.all(conditions, axis=0), 1, 0))
