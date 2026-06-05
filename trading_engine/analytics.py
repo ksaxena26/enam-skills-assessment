@@ -1,6 +1,6 @@
 import logging
 from pathlib import Path
-from typing import Dict
+from typing import Any, Dict, List, Optional
 
 import matplotlib
 matplotlib.use("Agg")
@@ -175,3 +175,235 @@ def plot_by_ticker(trade_summary: pd.DataFrame) -> plt.Figure:
     fig.savefig(PLOTS_DIR / "gain_by_ticker.png", dpi=150)
     logger.info("Saved gain_by_ticker.png")
     return fig
+
+
+def plot_trades_candlestick(
+    trade_log: pd.DataFrame,
+    features_d: pd.DataFrame,
+    daily_signals: Optional[pd.DataFrame] = None,
+) -> List[Any]:
+    """
+    One interactive Plotly candlestick chart per traded ticker.
+
+    Shows OHLC candles, EMA21, a dotted stop-loss line for each holding period,
+    and buy/sell markers. Saves .html (always) and .png (requires kaleido) to
+    outputs/plots/candlestick_{ticker}.{ext}.
+    """
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+    except ImportError:
+        logger.error("plotly not installed — run: pip install plotly")
+        return []
+
+    PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    if len(trade_log) == 0:
+        logger.info("No trades in trade_log — skipping candlestick charts")
+        return []
+
+    has_ohlc = all(c in features_d.columns for c in ["open", "high", "low"])
+    has_volume = "volume" in features_d.columns
+    figures: List[Any] = []
+
+    for ticker in sorted(trade_log["ticker"].unique()):
+        # ── OHLC ──────────────────────────────────────────────────────────────
+        ohlc = (
+            features_d[features_d["symbol"] == ticker]
+            .copy()
+            .assign(date=lambda d: pd.to_datetime(d["date"]))
+            .sort_values("date")
+            .reset_index(drop=True)
+        )
+        if len(ohlc) == 0:
+            logger.warning("No price data for %s — skipping", ticker)
+            continue
+
+        # ── Trade events ───────────────────────────────────────────────────────
+        ticker_tl = trade_log[trade_log["ticker"] == ticker].copy()
+        ticker_tl["date"] = pd.to_datetime(ticker_tl["date"])
+        buys = ticker_tl[ticker_tl["event_type"] == "BUY"]
+        sells = ticker_tl[ticker_tl["event_type"] == "SELL"]
+
+        # ── Subplots (add volume row if available) ────────────────────────────
+        rows = 2 if has_volume else 1
+        fig = make_subplots(
+            rows=rows, cols=1,
+            shared_xaxes=True,
+            row_heights=[0.75, 0.25] if has_volume else [1.0],
+            vertical_spacing=0.03,
+        )
+
+        # ── Candles / close line ───────────────────────────────────────────────
+        if has_ohlc:
+            fig.add_trace(
+                go.Candlestick(
+                    x=ohlc["date"],
+                    open=ohlc["open"], high=ohlc["high"],
+                    low=ohlc["low"],   close=ohlc["close"],
+                    name="Price",
+                    increasing_line_color="#26a69a", increasing_fillcolor="#26a69a",
+                    decreasing_line_color="#ef5350", decreasing_fillcolor="#ef5350",
+                ),
+                row=1, col=1,
+            )
+        else:
+            fig.add_trace(
+                go.Scatter(
+                    x=ohlc["date"], y=ohlc["close"],
+                    name="Close", line=dict(color="#26a69a", width=1),
+                ),
+                row=1, col=1,
+            )
+
+        # ── EMA21 ──────────────────────────────────────────────────────────────
+        if "ema21" in ohlc.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=ohlc["date"], y=ohlc["ema21"],
+                    name="EMA 21",
+                    line=dict(color="#ffb300", width=1.2),
+                    opacity=0.9,
+                ),
+                row=1, col=1,
+            )
+
+        # ── Stop-loss — separate trace per contiguous holding period ──────────
+        if daily_signals is not None and len(daily_signals) > 0:
+            ds_t = (
+                daily_signals[daily_signals["ticker"] == ticker]
+                .copy()
+                .assign(date=lambda d: pd.to_datetime(d["date"]))
+                .sort_values("date")
+                .reset_index(drop=True)
+            )
+            if len(ds_t) > 0:
+                # Each uninterrupted in_portfolio=True block gets a unique id
+                ds_t["_pid"] = (~ds_t["in_portfolio"].astype(bool)).cumsum()
+                held = ds_t[ds_t["in_portfolio"].astype(bool)]
+                sl_in_legend = False
+                for _pid, grp in held.groupby("_pid", sort=True):
+                    valid = grp.dropna(subset=["sl_w"])
+                    if len(valid) == 0:
+                        continue
+                    fig.add_trace(
+                        go.Scatter(
+                            x=valid["date"],
+                            y=valid["sl_w"].astype(float),
+                            mode="lines",
+                            name="Stop Loss",
+                            line=dict(color="#ff5252", width=1.5, dash="dot"),
+                            legendgroup="sl",
+                            showlegend=not sl_in_legend,
+                            opacity=0.8,
+                        ),
+                        row=1, col=1,
+                    )
+                    sl_in_legend = True
+
+        # ── Buy markers ────────────────────────────────────────────────────────
+        if len(buys) > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=buys["date"], y=buys["execution_price"],
+                    mode="markers+text",
+                    name="Buy",
+                    text=["B"] * len(buys),
+                    textposition="bottom center",
+                    textfont=dict(size=8, color="white"),
+                    marker=dict(
+                        symbol="triangle-up", size=14,
+                        color="#1565c0",
+                        line=dict(width=1, color="white"),
+                    ),
+                ),
+                row=1, col=1,
+            )
+
+        # ── Sell markers ───────────────────────────────────────────────────────
+        if len(sells) > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=sells["date"], y=sells["execution_price"],
+                    mode="markers+text",
+                    name="Sell",
+                    text=["S"] * len(sells),
+                    textposition="top center",
+                    textfont=dict(size=8, color="white"),
+                    marker=dict(
+                        symbol="triangle-down", size=14,
+                        color="#b71c1c",
+                        line=dict(width=1, color="white"),
+                    ),
+                ),
+                row=1, col=1,
+            )
+
+        # ── Volume bars ────────────────────────────────────────────────────────
+        if has_volume:
+            bar_colors = [
+                "#26a69a" if c >= o else "#ef5350"
+                for c, o in zip(
+                    ohlc["close"],
+                    ohlc["open"] if has_ohlc else ohlc["close"],
+                )
+            ]
+            fig.add_trace(
+                go.Bar(
+                    x=ohlc["date"], y=ohlc["volume"],
+                    name="Volume", marker_color=bar_colors,
+                    opacity=0.5, showlegend=False,
+                ),
+                row=2, col=1,
+            )
+
+        # ── Title with trade summary ───────────────────────────────────────────
+        n_b, n_s = len(buys), len(sells)
+        gain_str = ""
+        if n_s > 0 and "realized_gain_pct" in sells.columns:
+            net = sells["realized_gain_pct"].sum() * 100
+            gain_str = f"  |  Realized: {net:+.1f}%"
+
+        fig.update_layout(
+            title=dict(
+                text=f"<b>{ticker}</b>  —  {n_b} buy{'s' if n_b != 1 else ''}, "
+                     f"{n_s} sell{'s' if n_s != 1 else ''}{gain_str}",
+                font=dict(size=15),
+            ),
+            xaxis_rangeslider_visible=False,
+            template="plotly_dark",
+            height=600 if not has_volume else 720,
+            legend=dict(
+                orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
+            ),
+            margin=dict(t=80, b=40, l=60, r=40),
+            hovermode="x unified",
+        )
+        fig.update_yaxes(title_text="Price", row=1, col=1)
+        if has_volume:
+            fig.update_yaxes(title_text="Volume", showticklabels=False, row=2, col=1)
+
+        # ── Save HTML (always) ────────────────────────────────────────────────
+        html_path = PLOTS_DIR / f"candlestick_{ticker}.html"
+        fig.write_html(str(html_path), include_plotlyjs="cdn")
+        logger.info("Saved candlestick_%s.html", ticker)
+
+        # ── Save PNG (needs kaleido) ───────────────────────────────────────────
+        try:
+            png_path = PLOTS_DIR / f"candlestick_{ticker}.png"
+            fig.write_image(
+                str(png_path),
+                width=1400,
+                height=600 if not has_volume else 720,
+                scale=1.5,
+            )
+            logger.info("Saved candlestick_%s.png", ticker)
+        except Exception as exc:
+            logger.warning(
+                "PNG skipped for %s (pip install kaleido for static export): %s",
+                ticker, exc,
+            )
+
+        figures.append(fig)
+
+    return figures

@@ -100,13 +100,19 @@ def _write_outputs(
 
 # ── Main backtest ─────────────────────────────────────────────────────────────
 
-def run_backtest(features_d: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+def run_backtest(
+    features_d: pd.DataFrame,
+    *,
+    write_outputs: bool = True,
+    run_analytics: bool = True,
+) -> Dict[str, pd.DataFrame]:
     """
     Execute the full backtest and return output DataFrames.
 
     Returns a dict with keys: trade_log, daily_signals, portfolio_daily,
-    trade_summary. Also writes Parquet/CSV files to outputs/ and plots to
-    outputs/plots/.
+    trade_summary, summary_stats.
+    Set write_outputs=False and run_analytics=False to skip file I/O and
+    plots (used during hyperparameter optimization).
     """
     # ── Prepare input ────────────────────────────────────────────────────────
     df = features_d.copy()
@@ -366,17 +372,21 @@ def run_backtest(features_d: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         ]
     )
 
-    # ── Write outputs ─────────────────────────────────────────────────────────
-    _write_outputs(trade_log, daily_signals, portfolio_daily, trade_summary)
-
-    # ── Analytics ─────────────────────────────────────────────────────────────
+    # ── Summary stats (always computed — cheap) ───────────────────────────────
     summary_stats = analytics.compute_summary_stats(portfolio_daily, trade_summary)
     logger.info("Backtest complete. Summary: %s", summary_stats)
 
-    analytics.plot_portfolio_curve(portfolio_daily)
-    analytics.plot_drawdown(portfolio_daily)
-    analytics.plot_trade_distribution(trade_summary)
-    analytics.plot_by_ticker(trade_summary)
+    # ── File outputs (skipped during optimization) ────────────────────────────
+    if write_outputs:
+        _write_outputs(trade_log, daily_signals, portfolio_daily, trade_summary)
+
+    # ── Plots (skipped during optimization) ───────────────────────────────────
+    if run_analytics:
+        analytics.plot_portfolio_curve(portfolio_daily)
+        analytics.plot_drawdown(portfolio_daily)
+        analytics.plot_trade_distribution(trade_summary)
+        analytics.plot_by_ticker(trade_summary)
+        analytics.plot_trades_candlestick(trade_log, df, daily_signals)
 
     return {
         "trade_log": trade_log,
@@ -391,7 +401,14 @@ def run_backtest(features_d: pd.DataFrame) -> Dict[str, pd.DataFrame]:
 
 if __name__ == "__main__":
     import sys
+    import os
     from pathlib import Path
+
+    # Ensure project root is on sys.path when run as a script
+    _root = Path(__file__).resolve().parent.parent
+    os.chdir(_root)
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
 
     data_path = Path("data/features/features_d.csv")
     if not data_path.exists():
