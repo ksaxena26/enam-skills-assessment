@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 140 56">
+  <!-- subtle grid -->
+  <line x1="0" y1="14" x2="140" y2="14" stroke="#26a69a" stroke-width="0.4" opacity="0.25"/>
+  <line x1="0" y1="28" x2="140" y2="28" stroke="#26a69a" stroke-width="0.4" opacity="0.25"/>
+  <line x1="0" y1="42" x2="140" y2="42" stroke="#26a69a" stroke-width="0.4" opacity="0.25"/>
+
+  <!-- candle 1: bearish -->
+  <line x1="20" y1="36" x2="20" y2="52" stroke="#ef5350" stroke-width="1.5"/>
+  <rect x="14" y="41" width="12" height="10" fill="#ef5350" rx="1.5"/>
+  <line x1="20" y1="28" x2="20" y2="36" stroke="#ef5350" stroke-width="1.5"/>
+
+  <!-- candle 2: bullish -->
+  <line x1="52" y1="30" x2="52" y2="50" stroke="#26a69a" stroke-width="1.5"/>
+  <rect x="46" y="22" width="12" height="16" fill="#26a69a" rx="1.5"/>
+  <line x1="52" y1="16" x2="52" y2="22" stroke="#26a69a" stroke-width="1.5"/>
+
+  <!-- candle 3: bullish -->
+  <line x1="84" y1="18" x2="84" y2="40" stroke="#26a69a" stroke-width="1.5"/>
+  <rect x="78" y="10" width="12" height="18" fill="#26a69a" rx="1.5"/>
+  <line x1="84" y1="5"  x2="84" y2="10" stroke="#26a69a" stroke-width="1.5"/>
+
+  <!-- candle 4: bullish, tallest -->
+  <line x1="116" y1="8"  x2="116" y2="30" stroke="#26a69a" stroke-width="1.5"/>
+  <rect x="110" y="2"  width="12" height="20" fill="#26a69a" rx="1.5"/>
+  <line x1="116" y1="1"  x2="116" y2="2"  stroke="#26a69a" stroke-width="1.5"/>
+
+  <!-- amber trend line -->
+  <polyline points="8,50 40,38 72,24 104,12 136,4"
+            stroke="#ffb300" stroke-width="2"
+            fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0.85"/>
+  <!-- arrow head -->
+  <polygon points="136,4 128,4 132,10" fill="#ffb300" opacity="0.85"/>
+</svg>

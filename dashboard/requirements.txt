@@ -1,0 +1,21 @@
+# Core dashboard
+streamlit>=1.40.0
+plotly>=5.0.0
+pandas>=2.0.0
+numpy>=1.26.0
+pyarrow>=14.0.0
+
+# Engineering pipeline
+ta>=0.11.0
+pandas_ta>=0.3.14b0
+scipy>=1.10.0
+
+# Optimisation
+optuna>=3.0.0
+
+# Web server (streamlit dependency — pin to avoid starlette conflicts)
+starlette>=0.46
+fastapi>=0.120.0
+
+# Optional: static PNG export of candlestick charts
+kaleido>=0.2.1
